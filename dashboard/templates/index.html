@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Access control lab</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body data-refresh="{{ refresh_ms }}" data-service="{{ service_name }}">
+<aside class="side">
+  <div class="brand"><span class="mark" aria-hidden="true"></span><div><b>SDN access lab</b><small>{{ lab }}</small></div></div>
+  <nav>
+    <a href="#overview">System overview</a>
+    <a href="#auth">Authentication</a>
+    <a href="#sessions">Active sessions</a>
+    <a href="#access">Network access</a>
+    <a href="#flows">OpenFlow rules</a>
+    <a href="#events">Event log</a>
+  </nav>
+  <p class="side-note">Read-only view. Access is granted only by the authentication server through the controller.</p>
+</aside>
+<main>
+  <header class="top">
+    <h1>Authentication and network access control</h1>
+    <div class="tools">
+      <span id="updated" class="muted">waiting for data</span>
+      <label class="switch"><input type="checkbox" id="auto" checked><span>Auto refresh</span></label>
+      <button id="refresh" type="button">Refresh now</button>
+    </div>
+  </header>
+
+  <section id="overview">
+    <h2>System overview</h2>
+    <div id="cards" class="cards"></div>
+    <div class="panel topo"><div id="topo" aria-label="Topology and access state"></div>
+      <ul class="legend"><li><i class="dot allow"></i>granted</li><li><i class="dot deny"></i>default deny</li><li><i class="dot off"></i>unknown</li></ul></div>
+  </section>
+
+  <section id="auth"><h2>Authentication activity</h2><div class="panel" id="auth-body"></div></section>
+  <section id="sessions"><h2>Active sessions</h2><div class="panel" id="sessions-body"></div></section>
+  <section id="access"><h2>Network access control</h2><div class="panel" id="access-body"></div></section>
+  <section id="flows"><h2>OpenFlow rules <span class="muted small" id="flows-meta"></span></h2><div class="panel" id="flows-body"></div></section>
+  <section id="events">
+    <h2>Event log</h2>
+    <div class="chips" id="chips">
+      <button data-cat="" class="on">All</button><button data-cat="auth">Authentication</button>
+      <button data-cat="session">Sessions</button><button data-cat="policy">Policy</button>
+      <button data-cat="network">Network</button><button data-cat="service">Service</button>
+    </div>
+    <div class="panel" id="events-body"></div>
+  </section>
+</main>
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

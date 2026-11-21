@@ -1,0 +1,70 @@
+{
+  "lab": {
+    "subnet": "10.10.0.0/24",
+    "prefix_len": 24,
+    "switch": { "name": "s1", "dpid": "0000000000000001", "datapath": "kernel" },
+    "switches": [
+      { "name": "s1", "dpid": "0000000000000001", "datapath": "kernel" },
+      { "name": "s2", "dpid": "0000000000000002", "datapath": "kernel" },
+      { "name": "s3", "dpid": "0000000000000003", "datapath": "kernel" }
+    ],
+    "links": [
+      { "s1": "s1", "p1": 3, "s2": "s2", "p2": 3 },
+      { "s1": "s1", "p1": 4, "s2": "s3", "p2": 2 }
+    ],
+    "hosts": {
+      "h1":   { "role": "client",     "ip": "10.10.0.1",   "mac": "00:00:00:00:00:01", "switch": "s2", "port": 1 },
+      "h2":   { "role": "client",     "ip": "10.10.0.2",   "mac": "00:00:00:00:00:02", "switch": "s2", "port": 2 },
+      "h3":   { "role": "client",     "ip": "10.10.0.3",   "mac": "00:00:00:00:00:03", "switch": "s3", "port": 1 },
+      "srv":  { "role": "service",    "ip": "10.10.0.100", "mac": "00:00:00:00:01:00", "switch": "s1", "port": 1 },
+      "root": { "role": "management", "ip": "10.10.0.254", "mac": "00:00:00:00:fe:fe", "switch": "s1", "port": 2 }
+    }
+  },
+  "services": {
+    "protected-echo": { "host": "srv", "port": 9000, "description": "Protected TCP echo service" }
+  },
+  "policy": {
+    "roles": {
+      "student": ["protected-echo"],
+      "admin":   ["protected-echo"],
+      "guest":   []
+    }
+  },
+  "auth": {
+    "bind_host": "0.0.0.0",
+    "port": 5000,
+    "session_ttl_seconds": 300,
+    "socket_timeout_seconds": 30,
+    "max_message_bytes": 4096,
+    "max_connections": 256,
+    "reaper_interval_seconds": 1.0,
+    "max_failed_logins": 5,
+    "lockout_seconds": 30,
+    "session_history": 50,
+    "admin_host": "127.0.0.1",
+    "admin_port": 5001,
+    "admin_token": "lab-admin-token-change-me",
+    "tls": {
+      "enabled": true,
+      "cert": "certs/server.crt",
+      "key": "certs/server.key",
+      "ca_cert": "certs/ca.crt"
+    }
+  },
+  "controller": {
+    "openflow_host": "127.0.0.1",
+    "openflow_port": 6653,
+    "api_host": "127.0.0.1",
+    "api_port": 8080,
+    "api_token": "lab-policy-token-change-me",
+    "max_grant_seconds": 3600,
+    "flow_poll_seconds": 2.0
+  },
+  "dashboard": { "host": "127.0.0.1", "port": 5050, "refresh_ms": 2000 },
+  "paths": {
+    "events_log": "logs/events.jsonl",
+    "users_db": "data/users.json",
+    "run_dir": "run",
+    "log_dir": "logs"
+  }
+}

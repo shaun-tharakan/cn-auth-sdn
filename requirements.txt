@@ -1,0 +1,7 @@
+# SDN controller (OpenFlow 1.3). 3.0.1 is the last line that still ships the
+# osken-manager launcher; verified on Python 3.12 / eventlet 0.41.
+os-ken==3.0.1
+# Dashboard (web UI)
+Flask>=3.0,<4
+# The authentication server, client, policy layer, Mininet topology and tests
+# use only the Python standard library (plus the apt-installed `mininet`).

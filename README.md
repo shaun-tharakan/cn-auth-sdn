@@ -1,173 +1,270 @@
-# Authentication and Network Access Control Using SDN  (D1)
+# CN-Auth-SDN: TCP/TLS Authentication & Dynamic SDN Access Control
 
-A TCP authentication service whose decisions are enforced **inside the network**: a Mininet host can
-only reach the protected service after it has authenticated, been authorised, and the SDN controller has
-installed OpenFlow rules on Open vSwitch. Logout, expiry or revocation removes those rules again.
+A zero-trust network access control system where hosts must authenticate with a socket-based authentication service before an OS-Ken OpenFlow 1.3 SDN controller dynamically installs time-limited flow rules to grant, restrict, or revoke access to a protected service across a multi-switch Mininet/Open vSwitch fabric.
 
-```
- h1 h2 h3 ──TCP login/access──▶ Auth server ──HTTP (token)──▶ SDN controller ──OpenFlow 1.3──▶ Open vSwitch s1
- (clients)    (10.10.0.254:5000)  sessions+policy               (OS-Ken)                          │
-    └───────── TCP :9000 (only after a grant) ───────────────────────────────────────────▶ srv (protected service)
-                                     Dashboard (Flask, read-only) ◀── auth admin API, controller API, event log
-```
+---
 
-## 1. What is implemented (D1) and what is not
+## Project Report
 
-| D1 requirement | Where |
+* **PDF Report:** [View Project Report (PDF)](docs/cn_auth_sdn_project_report.pdf)
+
+---
+
+## System Overview
+
+* **Authentication ≠ Authorization:** Logging in verifies identity and issues a 256-bit `session_id` with a 300s TTL, but network packets remain blocked until the policy engine approves the user's role and the controller installs OpenFlow rules.
+* **Control & Data Plane Separation:** The TLS auth server (`:5000`), OS-Ken controller (`:6653` OpenFlow / `:8080` Policy API), and read-only Flask dashboard (`:5050`) run in the host root namespace (`10.10.0.254`), while Mininet isolates `h1`–`h3` and `srv:9000` across three Open vSwitch instances (`s1`, `s2`, `s3`).
+* **Fail-Closed Design:** Switches run in `failMode="secure"`. If the controller is down, access requests fail closed, pending revocations retry every second, and switch-enforced `hard_timeout` values automatically expire stale grants.
+
+---
+
+## Features Implemented
+
+### Demo 1 — Core Authentication & Dynamic SDN Access
+* **Socket Auth Server (`auth/`):** Multi-threaded TCP server with `scrypt` password hashing, 256-bit session tokens, TTL expiry reaper, brute-force lockout, and session-to-IP binding.
+* **Policy Engine (`policy/`):** Role-based access control (`alice`/`student` and `carol`/`admin` allowed for `protected-echo`; `bob`/`guest` denied) and fail-closed `ControllerClient` authenticated with `X-Policy-Token`.
+* **OS-Ken OpenFlow 1.3 Controller (`controller/`):** Priority ladder (`200` grant > `100` default-deny > `10` L2 forwarding > `0` table-miss), `OFPBarrierReply` confirmation, and 64-bit `cookie`-based revocation.
+* **Mininet Lab & Dashboard (`network/`, `dashboard/`):** Protected TCP echo server (`srv:9000`), probe client, and live read-only Flask UI (`http://127.0.0.1:5050`).
+
+### Demo 2 — Security, Scale, Multi-Switch & Admin Control
+* **TLS Authentication Channel:** `scripts/gen_certs.sh` generates a local CA (`certs/ca.crt`) and SAN-signed server certificate (`10.10.0.254` and `127.0.0.1`). `auth/server.py` enforces TLS 1.2+ (ephemeral ECDHE + symmetric encryption) and rejects plaintext TCP connections.
+* **Multi-Switch Topology (`s1`, `s2`, `s3`):** Access switches `s2` (`h1`, `h2`) and `s3` (`h3`) trunk to core switch `s1` (`srv`, `root`). The controller uses BFS path routing to install priority-`200` rules only on switches along the active path (`s2 → s1` for `h1`; `s3 → s1` for `h3`).
+* **Concurrent Users & Load Testing:** `BoundedSemaphore(256)` connection cap, `SessionManager` `RLock`, controller `_op_lock`/`_state_lock` with per-user `user_state`, and `scripts/load_test.py` for multi-threaded TLS benchmarking.
+* **Admin Role (`carol`):** In-band TLS commands (`auth.client admin ...`) and local CLI (`auth.admin`) to list active users (`users`), revoke sessions (`revoke`), view audit logs (`logs`), and block/unblock hosts (`block`/`unblock`) across all switches at priority `300`.
+
+---
+
+## Repository Structure
+
+| Directory | Purpose |
 |---|---|
-| TCP auth server, multiple concurrent clients, newline-JSON protocol | `auth/server.py`, `docs/protocol.md` |
-| CLI client (login, access, status, logout, shell) | `auth/client.py` |
-| scrypt password hashing, random session ids, expiry, logout, revocation, lockout | `auth/passwords.py`, `auth/sessions.py`, `auth/server.py` |
-| Authorization (authentication ≠ authorization) | `policy/engine.py` |
-| Real SDN controller + dynamic OpenFlow install/remove | `controller/` (OS-Ken, OpenFlow 1.3) |
-| Auth → controller integration (trusted token API, fail-closed) | `policy/controller_client.py`, controller HTTP API |
-| Mininet topology + protected service | `network/` |
-| Dashboard on real state | `dashboard/` |
-| Logs, unit tests, Mininet integration tests, docs | `common/events.py`, `tests/`, `docs/` |
+| `auth/` | TLS/TCP auth server, CLI client, `scrypt` passwords, session manager, admin CLI & HTTP API |
+| `policy/` | Pure authorization engine (`PolicyEngine`) and fail-closed `ControllerClient` |
+| `controller/` | OS-Ken OpenFlow 1.3 app, BFS multi-switch rule generator (`flow_rules.py`), `OFPFlowMod` converter |
+| `network/` | 3-switch Mininet topology (`topology.py`), protected echo service (`srv:9000`), probe client |
+| `dashboard/` | Read-only Flask web UI (`http://127.0.0.1:5050`) polling live server, switch, and log state |
+| `common/` | Shared configuration loader/validator (`config.py`) and JSONL event logger (`events.py`) |
+| `config/` | Lab topology, switch links, services, roles, TLS paths, and ports (`config.json`) |
+| `scripts/` | Setup, TLS cert generation, start/stop helpers, load test, and unit/integration test runners |
+| `tests/` | 61 unit tests (`tests/unit/`) and 11 Mininet + OVS integration tests (`tests/integration/`) |
+| `docs/` | Project report (PDF & DOCX), architecture notes, protocol spec, and demo guides |
 
-**Reserved for D2 (not implemented):** see `docs/extension_plan.md` (richer roles/policies, stronger identity binding,
-idle timeouts and renewal, TLS for the auth channel, performance evaluation, etc.).
+---
 
-## 2. Verified environment
+## Setup & Three-Terminal Workflow
 
-Everything below was executed (not just written) in an Ubuntu **24.04.4 LTS** environment with **Python 3.12.3**,
-**Open vSwitch 3.3.9**, **Mininet 2.3.0**, **OS-Ken 3.0.1** (eventlet 0.41.3), **Flask 3.1.3**.
-
-* Controller choice: OS-Ken is the maintained Ryu fork. Newer OS-Ken releases (4.x) removed the `osken-manager`
-  launcher and the WSGI helper, so `requirements.txt` **pins `os-ken==3.0.1`**; the controller's HTTP API uses
-  `eventlet.wsgi` directly. Original Ryu 4.34 is not used (known breakage on Python ≥ 3.10).
-* OpenFlow **1.3** only (switch is started with `protocols=OpenFlow13`, controller declares `OFP_VERSIONS=[1.3]`).
-* **Other Ubuntu/Python versions are not verified.** Ubuntu 22.04 (Python 3.10) should work with the same pins but I did not test it.
-* My test sandbox had no OVS *kernel* module, so the end-to-end tests ran with the OVS **userspace datapath**
-  (`CNAUTH_OVS_DATAPATH=user`). Your VM will normally use the kernel datapath (the default). The control-plane code
-  path (OpenFlow messages, flow tables) is identical; see "Honest test report" below.
-
-## 3. Setup (in the Ubuntu VM)
-
-Edit on Windows with VS Code, then either (a) use **VS Code Remote - SSH** to open the folder inside the VM, or (b) copy the ZIP into the VM.
-
+### First-Time Setup (run once, without `sudo`)
 ```bash
-unzip cn-auth-sdn.zip && cd cn-auth-sdn
-scripts/setup.sh          # apt: mininet + openvswitch-switch; .venv (system-site-packages); pip install; demo users; checks
-sudo systemctl start openvswitch-switch      # if setup.sh warns that it is not running
+bash scripts/setup.sh
 ```
 
-`.venv` is created with `--system-site-packages` on purpose: Mininet's Python module comes from apt and must stay importable.
-
-## 4. Configuration
-
-Everything (IPs, MACs, switch ports, service port, timeouts, secrets, paths) is in `config/config.json`.
-Defaults: subnet `10.10.0.0/24`, h1/h2/h3 = `.1/.2/.3`, `srv` = `.100` (service port `9000`), VM root namespace = `.254`
-(auth server `:5000`), controller OpenFlow `:6653`, controller API `127.0.0.1:8080`, auth admin API `127.0.0.1:5001`,
-dashboard `127.0.0.1:5050`, session lifetime 300 s. Override secrets without editing the file:
-`CNAUTH_API_TOKEN`, `CNAUTH_ADMIN_TOKEN`; alternative config: `CNAUTH_CONFIG=/path/to/config.json`.
-
-Demo users (created by `python3 -m auth.init_users`, stored hashed in `data/users.json`):
-
-| user | password | role | may use `protected-echo`? |
-|---|---|---|---|
-| alice | `alice-demo-pw` | student | yes |
-| carol | `carol-demo-pw` | admin | yes |
-| bob | `bob-demo-pw` | guest | **no** (can log in, authorization denied) |
-
-## 5. Run it (exact order)
-
+### Terminal 1 — Start Backend (normal Ubuntu/WSL terminal, not `mininet>`)
 ```bash
-# terminal 1 – controller + auth server + dashboard in the background (pid files in run/, logs in logs/)
+cd ~/cn-auth-sdn-d2gem
 scripts/start.sh backend
-# terminal 2 – the Mininet lab (asks for sudo, opens the Mininet CLI)
+```
+Starts the OS-Ken controller, TLS authentication server, and Flask dashboard in the background. Open the dashboard in your browser:
+`http://127.0.0.1:5050`
+
+### Terminal 2 — Start Mininet Topology (normal Ubuntu/WSL terminal)
+```bash
+cd ~/cn-auth-sdn-d2gem
+sudo mn -c
 scripts/start.sh topology
 ```
-(or run `scripts/start.sh controller`, `auth`, `dashboard` in three separate terminals to watch each log).
-Start the **controller before the topology**; the topology prints a warning if the switch never connects.
+Wait for `switches connected to the controller; lab is ready` and the `mininet>` prompt. All host demo commands below run here.
 
-Open the dashboard at <http://127.0.0.1:5050> (from Windows: VS Code forwards the port automatically, or
-`ssh -L 5050:127.0.0.1:5050 user@vm`).
-
-### Using the CLI (inside the Mininet CLI)
-
-```text
-mininet> h1 python3 network/service_client.py                         # BLOCKED (default deny)
-mininet> h1 python3 -m auth.client login --user alice --password alice-demo-pw
-mininet> h1 python3 network/service_client.py                         # still BLOCKED: authenticated is not authorised
-mininet> h1 python3 -m auth.client access --service protected-echo    # ACCESS GRANTED
-mininet> h1 python3 network/service_client.py                         # REACHED ... echo
-mininet> h3 python3 network/service_client.py                         # BLOCKED (h3 never logged in)
-mininet> h1 python3 -m auth.client logout                             # network access revoked
-mininet> h1 python3 network/service_client.py                         # BLOCKED again
-```
-Interactive menu instead: `h1 python3 -m auth.client shell` (works from an `xterm h1`). Omit `--password` to be prompted
-(passwords on the command line are visible in `ps`; the flag exists for scripted demos).
-
-Other tools (second terminal in the VM): `python3 -m auth.admin list`, `python3 -m auth.admin revoke --user alice`,
-`scripts/demo_helpers.sh flows|grants|sessions|events|watch`.
-
-### Inspect OpenFlow rules
-
+### Terminal 3 — Watch Flow Rules (optional, normal Ubuntu/WSL terminal)
 ```bash
-sudo ovs-ofctl -O OpenFlow13 dump-flows s1          # the switch's real flow table
-scripts/demo_helpers.sh grants                       # only the priority-200 allow rules
+cd ~/cn-auth-sdn-d2gem
+watch -n 1 "sudo ovs-ofctl -O OpenFlow13 dump-flows s1; echo '--- s2 ---'; sudo ovs-ofctl -O OpenFlow13 dump-flows s2; echo '--- s3 ---'; sudo ovs-ofctl -O OpenFlow13 dump-flows s3"
 ```
-Granted state shows two `priority=200` rules (client→service and the reply path); denied state shows none.
 
-### Shut down and clean up
+### Pre-Demo Dashboard Checklist (`http://127.0.0.1:5050`)
+* **Authentication server:** `running` (`answers ping on TLS port 5000`)
+* **SDN controller:** `running` (`OpenFlow 1.3`)
+* **Open vSwitch:** `running` (`3/3 switches connected (s1, s2, s3)`)
+* **Mininet topology:** `running` (`switches s1,s2,s3, 5 nodes`)
+* **Protected service:** `running` (`process alive on 10.10.0.100:9000`)
+* **Network access & topology:** `h1`, `h2`, `h3` initially `denied` (dashed red), with priority-`100` `default-deny` rules on all three switches.
 
+---
+
+## Demo 1 Cases (Run at `mininet>`)
+
+### Case 1 — Unauthenticated host tries to access the service
 ```bash
-# leave the Mininet CLI with `exit`, then
-scripts/stop_backend.sh      # stops only the processes in run/*.pid
-scripts/cleanup.sh           # + removes bridge s1, its veth ports and run/ files; never runs `mn -c`
+h1 python3 network/service_client.py
 ```
-Last resort if Mininet was killed uncleanly: `sudo mn -c` (**note:** this deletes *every* OVS bridge on the VM and kills `controller`/`ovs-openflowd` processes).
+* **Expected:** `BLOCKED`. Priority-`100` default-deny rules drop traffic to `10.10.0.100:9000`.
 
-## 6. Tests
-
+### Case 2 — Alice logs in successfully
 ```bash
-scripts/run_unit_tests.sh          # no root; 50 tests (auth, sessions, policy, flow rules, controller logic, dashboard)
-scripts/run_integration_tests.sh   # needs sudo; real Mininet + OVS + controller; ~1 minute
-CNAUTH_OVS_DATAPATH=user scripts/run_integration_tests.sh   # only if the VM lacks the OVS kernel module
+h1 python3 -m auth.client login --user alice --password alice-demo-pw
 ```
-The integration test builds its own lab on different ports and a 10 s session lifetime. It proves: default deny,
-authorised access, other hosts blocked, a stolen session id rejected, authenticated-but-unauthorised denied, logout
-revocation, expiry revocation, admin revocation, flow-table changes, event log contents, and fail-closed behaviour when the
-controller dies.
+* **Expected:** `LOGIN OK: alice (role student) on host h1 [10.10.0.1]`. Creates a 300s session without granting network access yet.
 
-### Honest test report (what I actually ran)
+### Case 3 — Alice tries again before requesting authorization
+```bash
+h1 python3 network/service_client.py
+```
+* **Expected:** still `BLOCKED` (authentication ≠ authorization).
 
-| Suite | Result |
-|---|---|
-| Unit tests (50) | **all passed** (Ubuntu 24.04, Python 3.12.3) |
-| Mininet integration tests (10) | **all passed** on real Mininet 2.3.0 + Open vSwitch 3.3.9 + OS-Ken 3.0.1, using the OVS **userspace** datapath because the test machine has no OVS kernel module |
-| Same integration tests with the OVS *kernel* datapath, on VirtualBox, VS Code Remote-SSH, Windows-side browser | **not run by me** – please run `scripts/run_integration_tests.sh` in your VM and report failures |
-| Dashboard in a real browser (visual check) | **not run**; the dashboard's JSON endpoints were verified against the live stack, the HTML/JS/CSS were not opened in a browser |
+### Case 4 — Alice requests authorization & reaches the service
+```bash
+h1 python3 -m auth.client access --service protected-echo
+h1 python3 network/service_client.py
+```
+* **Expected:** `ACCESS GRANTED`, then `REACHED` (`echo: hello from a client`). The controller installs priority-`200` rules along `s2 → s1`.
 
-## 7. Troubleshooting
+### Case 5 — Other hosts remain blocked
+```bash
+h2 python3 network/service_client.py
+h3 python3 network/service_client.py
+```
+* **Expected:** both `BLOCKED`. Grants are pinned to `h1`'s port, MAC, and IP.
 
-| Symptom | Fix |
-|---|---|
-| Topology says the switch did not connect | Start the controller first (`scripts/start.sh backend`); check `logs/controller.out`; `sudo systemctl start openvswitch-switch` |
-| `ERROR: cannot connect to auth server 10.10.0.254:5000` | Auth server not running, or a firewall (`sudo ufw status`) blocks the `root-eth0` interface; `sudo ufw disable` for the lab |
-| `Exception: Error creating interface pair` / stale bridge | `scripts/cleanup.sh`, then retry (last resort `sudo mn -c`) |
-| Dashboard shows "controller stopped / unknown" | It is honest: that process is not answering. `logs/controller.out`, `logs/auth.out` |
-| `ModuleNotFoundError: mininet` in the venv | Recreate with `python3 -m venv --system-site-packages .venv` |
-| ACCESS DENIED `controller_unavailable` | Controller or switch is down; access is deliberately not granted (fail-closed) |
-| TCP hangs on the *userspace* datapath | Checksum offload on veth; the topology disables it automatically in `user` mode (needs `ethtool`) |
-| Port already in use | A stale process from an earlier run: `scripts/stop_backend.sh`; check `ss -ltnp` |
+### Case 6 — Bob (`guest`) logs in but is denied authorization
+```bash
+h2 python3 -m auth.client login --user bob --password bob-demo-pw
+h2 python3 -m auth.client access --service protected-echo
+```
+* **Expected:** `LOGIN OK`, then `ACCESS DENIED [role_not_permitted]`.
 
-## 8. Known limitations (honest security notes)
+### Case 7 — Inspect live switch rules
+```bash
+sh ovs-ofctl -O OpenFlow13 dump-flows s1
+```
+* **Expected:** Priority-`100` default-deny rules alongside Alice's priority-`200` allow rules while her grant is active.
 
-* Host↔session binding is a **controlled lab association**: the session is bound to the client's TCP source IP, and
-  the controller's allow rules additionally pin the **switch port + MAC + IP** from a static inventory in the config.
-  A host cannot borrow another host's session (different source IP) or use its rules from another port. It is *not*
-  a cryptographic identity: someone with root on the *same* Mininet host can act as that host, and a real network would need 802.1X/certificates.
-* The auth channel is plaintext TCP (a lab sniffer could read the password). TLS is a D2 proposal.
-* Controller API and auth admin API are protected by shared tokens in `config/config.json` and bound to 127.0.0.1; change the tokens for anything beyond a lab.
-* Sessions live in memory: restarting the auth server ends them (it also clears stale grants on startup).
-* If the switch reconnects, the controller wipes the flow table (all grants vanish; users must request access again).
-* If the controller dies, installed rules stay in the switch until their **hard timeout** (= remaining session time). That timeout is the backstop; the auth server also retries revocation until the controller returns.
-* Only IPv4/TCP to the protected service is modelled; IPv6 is dropped lab-wide.
-* ARP and traffic between clients and the management node are not restricted (only the protected host is).
+### Case 8 — Alice logs out & access is revoked
+```bash
+h1 python3 -m auth.client logout
+h1 python3 network/service_client.py
+```
+* **Expected:** `LOGGED OUT; network access revoked`, then `BLOCKED`.
 
-## 9. Documentation map
+### Optional Demo 1 Bonus — Session expiry & local admin revoke
+* **Session expiry:** Set `auth.session_ttl_seconds` to `30` in `config/config.json`, restart the backend (`scripts/stop_backend.sh && scripts/start.sh backend`), log in, request access, and wait 30s — the session expires and switch rules are removed.
+* **Local admin revoke (Terminal 3):**
+  ```bash
+  python3 -m auth.admin revoke --user alice
+  ```
 
-`docs/architecture.md` (diagrams, flow) · `docs/protocol.md` · `docs/component_explanations.md` (every file explained) ·
-`docs/demo_guide.md` (evaluation script) · `docs/viva_questions.md` · `docs/extension_plan.md` (D2 proposals).
+---
+
+## Demo 2 Cases (TLS, Multi-Switch, Admin Role & Concurrency)
+
+### Case 1 — TLS Plaintext Rejection & Handshake Verification
+At `mininet>`:
+```bash
+h1 python3 -m auth.client --no-tls status
+```
+* **Expected:** `ERROR: connection error: [Errno 104] Connection reset by peer`.
+
+Optional OpenSSL handshake check (Terminal 3, press `Ctrl+C` to exit):
+```bash
+echo '{"op":"ping"}' | openssl s_client -connect 127.0.0.1:5000 -CAfile certs/ca.crt -quiet
+```
+* **Expected:** `verify return:1` and `{"ok":true,"op":"ping","server":"cn-auth","tls":true,...}`.
+
+### Case 2 — Multi-Switch Path (`h1` on `s2 → s1 → srv`)
+At `mininet>`:
+```bash
+h1 python3 -m auth.client login --user alice --password alice-demo-pw
+h1 python3 -m auth.client access --service protected-echo
+sh ovs-ofctl -O OpenFlow13 dump-flows s2 | grep priority=200
+sh ovs-ofctl -O OpenFlow13 dump-flows s1 | grep priority=200
+sh ovs-ofctl -O OpenFlow13 dump-flows s3 | grep priority=200
+```
+* **Expected:** 2 priority-`200` rules on `s2`, 2 on `s1`, and 0 on `s3`.
+
+### Case 3 — Second Switch Path (`h3` on `s3 → s1 → srv`)
+At `mininet>`:
+```bash
+h3 python3 -m auth.client login --user carol --password carol-demo-pw
+h3 python3 -m auth.client access --service protected-echo
+h3 python3 network/service_client.py
+sh ovs-ofctl -O OpenFlow13 dump-flows s3 | grep priority=200
+```
+* **Expected:** `REACHED`, 2 priority-`200` rules on `s3`, and `h3 → s3 → s1` turns green on the dashboard.
+
+### Case 4 — Admin Role (`carol` on `h3` vs non-admin `alice` on `h1`)
+At `mininet>`:
+```bash
+# Non-admin denied
+h1 python3 -m auth.client admin users
+# -> Expected: ADMIN ERROR [forbidden]: admin role required
+
+# Admin lists users & views logs
+h3 python3 -m auth.client admin users
+h3 python3 -m auth.client admin logs --limit 10
+
+# Admin blocks h1 across all 3 switches (priority 300)
+h3 python3 -m auth.client admin block --host h1 --reason "suspicious traffic"
+sh ovs-ofctl -O OpenFlow13 dump-flows s2 | grep priority=300
+h1 python3 network/service_client.py
+h1 python3 -m auth.client login --user alice --password alice-demo-pw
+# -> Expected: BLOCKED at OVS, login rejected with host_blocked
+
+# Admin unblocks h1 & revokes a user
+h3 python3 -m auth.client admin unblock --host h1
+h1 python3 -m auth.client login --user alice --password alice-demo-pw
+h1 python3 -m auth.client access --service protected-echo
+h3 python3 -m auth.client admin revoke --user alice
+h1 python3 network/service_client.py
+# -> Expected: h1 recovers after unblock, then revoke drops Alice's session and h1 is BLOCKED again
+```
+
+### Case 5 — Concurrent Users & Multi-Threaded TLS Load Test
+Launch `h1` (`alice`), `h2` (`bob`), and `h3` (`carol`) concurrently at `mininet>`:
+```python
+py (lambda ts: ([t.start() for t in ts], [t.join() for t in ts]))([__import__("threading").Thread(target=lambda h,u,p: print(f"=== {h.name} ({u}) ===\n"+h.cmd(f"python3 -m auth.client login --user {u} --password {p} && python3 -m auth.client access --service protected-echo && python3 network/service_client.py")), args=x) for x in [(h1,"alice","alice-demo-pw"),(h2,"bob","bob-demo-pw"),(h3,"carol","carol-demo-pw")]])
+```
+
+Run the multi-threaded TLS load test from `h1` at `mininet>` (or from Terminal 3 with `--host 127.0.0.1`):
+```bash
+h1 python3 scripts/load_test.py --host 10.10.0.254 --clients 20 --iterations 2
+```
+* **Expected:** `errors: 0` with throughput (`ops/s`) and `p50`/`p95`/`max` latency metrics.
+
+---
+
+## Automated Tests
+
+Run from a normal Ubuntu/WSL terminal:
+```bash
+scripts/run_unit_tests.sh
+scripts/run_integration_tests.sh
+```
+
+---
+
+## Maintenance, Counter Reset & Full Cleanup
+
+### Reset Switch Packet Counters (without deleting rules)
+```bash
+for s in s1 s2 s3; do sudo ovs-ofctl -O OpenFlow13 reset-counters "$s"; done
+```
+
+### Clean Reset Between Demo Runs
+```bash
+scripts/stop_backend.sh
+sudo mn -c
+truncate -s 0 logs/events.jsonl
+rm -f run/client_session_*.json
+scripts/start.sh backend
+```
+
+### Full Cleanup Before Packaging / Sharing
+```bash
+cd ~/cn-auth-sdn-d2gem
+scripts/stop_backend.sh
+pkill -f osken-manager || true
+pkill -f "auth.server" || true
+pkill -f "dashboard.app" || true
+sudo mn -c
+rm -rf .venv logs/* run/* certs/* data/*
+find . -name '__pycache__' -exec rm -rf {} +
+find . -name '*:Zone.Identifier' -delete
+```
